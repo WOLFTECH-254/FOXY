@@ -1,0 +1,177 @@
+{
+  "_meta": {
+    "version": 1,
+    "updatedAt": "2026-06-03T20:13:39.799Z"
+  },
+  "bot_name": {
+    "botName": "FOXY BOT",
+    "updatedAt": "2026-05-28T18:12:01.541Z"
+  },
+  "bot_mode": {
+    "mode": "public"
+  },
+  "bot_settings": {
+    "prefix": "?",
+    "isPrefixless": false,
+    "prefixSetAt": "2026-05-28T18:26:59.514Z",
+    "prefixChangedAt": 1779992819514,
+    "previousPrefix": "?",
+    "previousIsPrefixless": false,
+    "version": "1.1.6"
+  },
+  "prefix_config": {
+    "prefix": "?",
+    "isPrefixless": false,
+    "setAt": "2026-05-28T18:26:59.511Z",
+    "timestamp": 1779992819511,
+    "version": "1.1.6",
+    "previousPrefix": "?",
+    "previousIsPrefixless": false
+  },
+  "owner_data": {
+    "OWNER_JID": "254141030655:28@s.whatsapp.net",
+    "OWNER_NUMBER": "254141030655",
+    "OWNER_CLEAN_JID": "254141030655@s.whatsapp.net",
+    "OWNER_CLEAN_NUMBER": "254141030655",
+    "ownerLID": null,
+    "linkedAt": "2026-05-28T18:20:36.267Z",
+    "autoLinked": false,
+    "previousOwnerCleared": true,
+    "version": "1.1.6"
+  },
+  "menu_style": {
+    "current": 1,
+    "setBy": "165507219083469",
+    "setAt": "2026-03-28T22:11:21.733Z",
+    "setFrom": "LID Device",
+    "chatType": "Group"
+  },
+  "group_invite_codes": {
+    "inviteCodes": [
+      "HjFc3pud3IA0R0WGr1V2Xu",
+      "HELdVhtvipKBlVbQ9T59b9"
+    ]
+  },
+  "blocked_users": {
+    "blocked": [
+      "254713046497@s.whatsapp.net"
+    ]
+  },
+  "channelreact": {
+    "enabled": true,
+    "emoji": "😊",
+    "totalReacted": 4,
+    "lastReacted": "2026-06-03T20:00:55.037Z",
+    "lastReactionTime": 1780516855036,
+    "subscribedJids": [
+      "120363426705024581@newsletter",
+      "120363424557809232@newsletter",
+      "120363419521878542@newsletter",
+      "120363405182019728@newsletter",
+      "120363409379753938@newsletter",
+      "120363410724044097@newsletter",
+      "120363406649804510@newsletter",
+      "120363421346912762@newsletter"
+    ],
+    "settings": {
+      "minDelay": 300000,
+      "maxDelay": 360000
+    }
+  },
+  "member_detection": {
+    "detectedMembers": {
+      "120363407678198680@g.us": [
+        {
+          "jid": "76601345732767@lid",
+          "name": "76601345732767",
+          "number": "76601345732767",
+          "addedAt": "2026-05-28T18:23:03.040Z",
+          "timestamp": 1779992583040,
+          "action": "add",
+          "addedBy": "unknown"
+        },
+        {
+          "jid": "74294965084370@lid",
+          "name": "74294965084370",
+          "number": "74294965084370",
+          "addedAt": "2026-05-28T18:25:41.214Z",
+          "timestamp": 1779992741214,
+          "action": "add",
+          "addedBy": "unknown"
+        },
+        {
+          "jid": "156444418683015@lid",
+          "name": "156444418683015",
+          "number": "156444418683015",
+          "addedAt": "2026-05-28T18:32:13.150Z",
+          "timestamp": 1779993133150,
+          "action": "add",
+          "addedBy": "unknown"
+        }
+      ]
+    },
+    "updatedAt": "2026-05-28T18:32:13.151Z",
+    "totalGroups": 1
+  },
+  "anticall_root": {
+    "settings": {},
+    "callLogs": [],
+    "blockedNumbers": [],
+    "lastCacheClear": "2026-05-28T18:20:21.904Z"
+  },
+  "antidelete": {
+    "autoCleanEnabled": true,
+    "maxAgeHours": 6,
+    "maxStorageMB": 50,
+    "showPhoneNumbers": true,
+    "ownerOnly": true,
+    "autoCleanRetrieved": true,
+    "showGroupNames": true,
+    "initialized": true,
+    "enabled": false,
+    "mode": "private",
+    "stats": {
+      "totalMessages": 0,
+      "deletedDetected": 0,
+      "retrieved": 0,
+      "mediaCaptured": 0,
+      "sentToDm": 0,
+      "sentToChat": 0,
+      "cacheCleans": 0,
+      "totalStorageMB": 0
+    }
+  },
+  "antidelete_status": {
+    "autoCleanEnabled": true,
+    "maxAgeHours": 3,
+    "maxStorageMB": 30,
+    "ownerOnly": true,
+    "autoCleanRetrieved": true,
+    "initialized": true
+  },
+  "antiedit": {
+    "gc": {
+      "enabled": true,
+      "mode": "private"
+    },
+    "pm": {
+      "enabled": true,
+      "mode": "private"
+    },
+    "groupConfigs": {},
+    "stats": {
+      "totalMessages": 100,
+      "editsDetected": 3,
+      "retrieved": 3,
+      "mediaCaptured": 21,
+      "sentToDm": 3,
+      "sentToChat": 0
+    }
+  },
+  "sticker_config": {
+    "defaultCollectionTime": 120,
+    "maxStickersPerPack": 30,
+    "autoCollect": true,
+    "maxStickersPerCollection": 100
+  }
+}

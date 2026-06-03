@@ -1,0 +1,538 @@
+ ================================================
+   Silent Wolf Core
+================================================
+
+================================================
+  TOSTATUS COMMAND — FULL DOCUMENTATION
+  For Baileys-based WhatsApp Bots (Node.js + @whiskeysockets/baileys)
+================================================
+
+WHAT IT DOES
+------------
+The .tostatus command lets the bot owner post content directly to their
+WhatsApp Status (Stories) from a chat. Supports text, images, videos, audio,
+and stickers — either sent directly or by replying to an existing message.
+
+USAGE
+-----
+  .tostatus Hello World            → Post a text status
+  (reply to image) .tostatus       → Post that image as a status
+  (reply to image) .tostatus Hi    → Post that image with "Hi" as caption
+  (reply to video) .tostatus       → Post that video as a status
+  (reply to audio) .tostatus       → Post that audio as a status
+  (send image with caption) .tostatus [caption]  → Post the image
+
+Aliases: .status, .setstatus, .updatestatus, .mystatus, .poststatus
+Owner-only command.
+
+==============================================
+  FILE: commands/owner/tostatus.js
+==============================================
+
+FULL SOURCE CODE
+----------------
+
+import { downloadContentFromMessage } from '@whiskeysockets/baileys';
+import { getOwnerName } from '../../lib/menuHelper.js';
+import { getPhoneFromLid } from '../../lib/sudo-store.js';
+
+// Core poster — sends to status@broadcast.
+// index.js bypasses the custom sendMessage wrapper for status@broadcast
+// and routes it straight to Baileys' original sendMessage so that:
+//   • backgroundColor is converted to ARGB int (Baileys' assertColor)
+//   • font is set as an enum number
+//   • messageContextInfo.messageSecret is NOT injected (only for events/polls)
+async function postPersonalStatus(sock, content, statusJidList, extraOpts = {}) {
+    return sock.sendMessage('status@broadcast', content, {
+        ...extraOpts,
+        statusJidList
+    });
+}
+
+// Download media from a quoted/direct message into a Buffer
+async function downloadMedia(message, type) {
+    const stream = await downloadContentFromMessage(message, type);
+    const chunks = [];
+    for await (const chunk of stream) chunks.push(chunk);
+    return {
+        buffer: Buffer.concat(chunks),
+        mimetype: message.mimetype || (
+            type === 'image'   ? 'image/jpeg'  :
+            type === 'video'   ? 'video/mp4'   :
+            type === 'audio'   ? 'audio/mp4'   :
+            type === 'sticker' ? 'image/webp'  :
+            'application/octet-stream'
+        )
+    };
+}
+
+// Detect the type of a quoted message and prepare the status content object
+async function processQuoted(quoted, captionOverride) {
+    if (quoted.imageMessage) {
+        const m = await downloadMedia(quoted.imageMessage, 'image');
+        return {
+            content: { image: m.buffer, mimetype: m.mimetype, caption: captionOverride || quoted.imageMessage.caption || '' },
+            mediaType: 'Image'
+        };
+    }
+    if (quoted.videoMessage) {
+        const m = await downloadMedia(quoted.videoMessage, 'video');
+        return {
+            content: { video: m.buffer, mimetype: m.mimetype, caption: captionOverride || quoted.videoMessage.caption || '' },
+            mediaType: 'Video'
+        };
+    }
+    if (quoted.audioMessage) {
+        const m = await downloadMedia(quoted.audioMessage, 'audio');
+        return {
+            content: { audio: m.buffer, mimetype: m.mimetype || 'audio/mp4', ptt: quoted.audioMessage.ptt || false },
+            mediaType: 'Audio'
+        };
+    }
+    if (quoted.stickerMessage) {
+        const m = await downloadMedia(quoted.stickerMessage, 'sticker');
+        return {
+            content: { image: m.buffer, caption: captionOverride || '' },
+            mediaType: 'Sticker'
+        };
+    }
+    const text = quoted.conversation || quoted.extendedTextMessage?.text || '';
+    const finalText = captionOverride ? `${text}\n\n${captionOverride}` : text;
+    return {
+        content: { text: finalText },
+        mediaType: 'Text'
+    };
+}
+
+// ─── Contact list cache (rebuilt max once per hour) ──────────────────────────
+let _statusContactsCache = null;
+let _statusContactsCacheTs  = 0;
+const STATUS_CONTACTS_TTL   = 60 * 60 * 1000; // 1 hour
+
+const isValidPnJid = (jid) =>
+    typeof jid === 'string' &&
+    jid.endsWith('@s.whatsapp.net') &&
+    !jid.includes(':');
+
+// Resolve a @lid JID → "phoneNumber@s.whatsapp.net"
+// WhatsApp uses LID (Linked ID) as a privacy-preserving identifier in group
+// participant lists on newer versions. These must be converted to real phone
+// JIDs before they can be used in statusJidList.
+// Tries three sources in order:
+//   1. In-memory lidPhoneCache  (fastest, built up as messages arrive)
+//   2. sudo-store DB            (persistent, pre-loaded on startup)
+//   3. Baileys signal repo      (authoritative but slightly slower)
+function resolveLidJid(jid, sock) {
+    if (!jid || !jid.endsWith('@lid')) return null;
+    const lidNum = jid.split('@')[0].split(':')[0];
+
+    const cached = globalThis.lidPhoneCache?.get(lidNum);
+    if (cached) return `${cached}@s.whatsapp.net`;
+
+    const stored = getPhoneFromLid(lidNum);
+    if (stored) return `${stored}@s.whatsapp.net`;
+
+    try {
+        const sig = sock?.signalRepository?.lidMapping;
+        if (sig?.getPNForLID) {
+            const formats = [jid, `${lidNum}:0@lid`, `${lidNum}@lid`];
+            for (const fmt of formats) {
+                try {
+                    const pn = sig.getPNForLID(fmt);
+                    if (pn) {
+                        const num = String(pn).split('@')[0].replace(/[^0-9]/g, '');
+                        if (num.length >= 7 && num !== lidNum) return `${num}@s.whatsapp.net`;
+                    }
+                } catch {}
+            }
+        }
+    } catch {}
+
+    return null;
+}
+
+// Add a single participant JID to the set.
+// Handles both plain phone JIDs and LID JIDs transparently.
+function addParticipant(jid, jidSet, sock) {
+    if (!jid) return;
+    if (isValidPnJid(jid)) { jidSet.add(jid); return; }
+    if (jid.endsWith('@lid')) {
+        const resolved = resolveLidJid(jid, sock);
+        if (resolved) jidSet.add(resolved);
+    }
+}
+
+// Build the full list of JIDs that should receive the status encryption key.
+// Without this list being correct, WhatsApp posts the status to its servers
+// but nobody can decrypt/view it — it silently appears to succeed.
+// Pulls from three sources and caches the result for 1 hour:
+//   Source 1 — global.contactNames   (sync events, grows over time)
+//   Source 2 — groupMetadataCache    (in-memory, populated on-demand)
+//   Source 3 — groupFetchAllParticipating() (live, definitive, ~3-10s)
+async function buildStatusJidList(sock) {
+    const rawId   = globalThis.OWNER_JID || sock.user?.id || '';
+    const numPart = rawId.split('@')[0].split(':')[0];
+    const ownerJid = numPart ? `${numPart}@s.whatsapp.net` : null;
+
+    const now = Date.now();
+    if (_statusContactsCache && (now - _statusContactsCacheTs) < STATUS_CONTACTS_TTL) {
+        const cached = new Set(_statusContactsCache);
+        if (ownerJid) cached.add(ownerJid);
+        return Array.from(cached);
+    }
+
+    const jidSet = new Set();
+
+    const contactMap = global.contactNames || new Map();
+    for (const [jid] of contactMap) addParticipant(jid, jidSet, sock);
+
+    const groupCache = globalThis.groupMetadataCache || new Map();
+    for (const [, entry] of groupCache) {
+        for (const p of (entry?.data?.participants || [])) addParticipant(p.id, jidSet, sock);
+    }
+
+    let lidCount = 0, resolvedCount = 0;
+    try {
+        const groups = await Promise.race([
+            sock.groupFetchAllParticipating(),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 15000))
+        ]);
+        for (const [, group] of Object.entries(groups)) {
+            for (const p of (group.participants || [])) {
+                const before = jidSet.size;
+                if (p.id?.endsWith('@lid')) lidCount++;
+                addParticipant(p.id, jidSet, sock);
+                if (p.id?.endsWith('@lid') && jidSet.size > before) resolvedCount++;
+            }
+        }
+        console.log(`📱 [toStatus] Fetched ${Object.keys(groups).length} groups — ${lidCount} LIDs, resolved ${resolvedCount}`);
+    } catch (e) {
+        console.log(`📱 [toStatus] groupFetchAllParticipating skipped: ${e.message}`);
+    }
+
+    if (ownerJid) jidSet.add(ownerJid);
+
+    const list = Array.from(jidSet);
+    _statusContactsCache  = list;
+    _statusContactsCacheTs = now;
+
+    console.log(`📱 [toStatus] statusJidList built: ${list.length} contacts — cached for 1h`);
+    return list.length > 0 ? list : (ownerJid ? [ownerJid] : ['0@s.whatsapp.net']);
+}
+
+export default {
+    name: 'tostatus',
+    alias: ['status', 'setstatus', 'updatestatus', 'mystatus', 'poststatus'],
+    category: 'owner',
+    description: 'Post content to your WhatsApp Status (Stories)',
+    ownerOnly: true,
+
+    async execute(sock, msg, args, PREFIX, extra) {
+        const chatId = msg.key.remoteJid;
+        const { jidManager } = extra;
+
+        const isSudoUser = extra?.isSudo ? extra.isSudo() : false;
+        if (!jidManager.isOwner(msg) && !isSudoUser) {
+            return sock.sendMessage(chatId, { text: '❌ *Owner Only Command!*' }, { quoted: msg });
+        }
+
+        const rawText =
+            msg.message?.conversation ||
+            msg.message?.extendedTextMessage?.text ||
+            msg.message?.imageMessage?.caption ||
+            msg.message?.videoMessage?.caption || '';
+
+        const textAfterCmd = rawText
+            .replace(/^[=!#?/.]?(tostatus|status|setstatus|updatestatus|mystatus|poststatus)\s*/i, '')
+            .trim();
+
+        const directImage  = msg.message?.imageMessage;
+        const directVideo  = msg.message?.videoMessage;
+        const directAudio  = msg.message?.audioMessage;
+        const quotedMsg    = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+
+        if (!quotedMsg && !textAfterCmd && !directImage && !directVideo && !directAudio) {
+            return sock.sendMessage(chatId, {
+                text:
+                    `╭─⌈ 📱 *POST TO STATUS* ⌋\n│\n` +
+                    `├─⊷ *${PREFIX}tostatus <text>*\n│  └⊷ Post a text status\n` +
+                    `├─⊷ Reply to image + *${PREFIX}tostatus [caption]*\n│  └⊷ Post an image\n` +
+                    `├─⊷ Reply to video + *${PREFIX}tostatus [caption]*\n│  └⊷ Post a video\n` +
+                    `├─⊷ Reply to audio + *${PREFIX}tostatus*\n│  └⊷ Post an audio note\n` +
+                    `├─⊷ Send image with caption *${PREFIX}tostatus [caption]*\n│  └⊷ Post that image\n` +
+                    `╰⊷ *Powered by ${getOwnerName().toUpperCase()} TECH*`
+            }, { quoted: msg });
+        }
+
+        try {
+            let content   = null;
+            let mediaType = 'Text';
+            const bgColor = '#1b5e20';
+            const font    = 0;
+
+            if (directImage && !quotedMsg) {
+                const m = await downloadMedia(directImage, 'image');
+                const cap = textAfterCmd ||
+                    directImage.caption?.replace(/^[=!#?/.]?(tostatus|status|setstatus|updatestatus|mystatus|poststatus)\s*/i, '').trim() || '';
+                content   = { image: m.buffer, mimetype: m.mimetype, caption: cap };
+                mediaType = 'Image';
+            } else if (directVideo && !quotedMsg) {
+                const m = await downloadMedia(directVideo, 'video');
+                const cap = textAfterCmd ||
+                    directVideo.caption?.replace(/^[=!#?/.]?(tostatus|status|setstatus|updatestatus|mystatus|poststatus)\s*/i, '').trim() || '';
+                content   = { video: m.buffer, mimetype: m.mimetype, caption: cap };
+                mediaType = 'Video';
+            } else if (directAudio && !quotedMsg) {
+                const m = await downloadMedia(directAudio, 'audio');
+                content   = { audio: m.buffer, mimetype: m.mimetype || 'audio/mp4', ptt: directAudio.ptt || false };
+                mediaType = 'Audio';
+            } else if (quotedMsg) {
+                const r   = await processQuoted(quotedMsg, textAfterCmd);
+                content   = r.content;
+                mediaType = r.mediaType;
+            } else if (textAfterCmd) {
+                content   = { text: textAfterCmd };
+                mediaType = 'Text';
+            }
+
+            if (!content) {
+                return sock.sendMessage(chatId, { text: '❌ No valid content to post!' }, { quoted: msg });
+            }
+
+            await sock.sendMessage(chatId, { react: { text: '⏳', key: msg.key } });
+
+            const statusJidList = await buildStatusJidList(sock);
+            console.log(`📱 [toStatus] Posting ${mediaType} to ${statusJidList.length} contacts`);
+
+            const extraOpts = mediaType === 'Text' ? { backgroundColor: bgColor, font } : {};
+            const result = await postPersonalStatus(sock, content, statusJidList, extraOpts);
+
+            await sock.sendMessage(chatId, { react: { text: '✅', key: msg.key } });
+
+            let confirmMsg = `✅ *Status Posted!*\n\n📊 Type: ${mediaType}\n`;
+            if (content.caption) confirmMsg += `📝 Caption: ${content.caption.substring(0, 60)}${content.caption.length > 60 ? '...' : ''}\n`;
+            if (content.text)    confirmMsg += `📄 Text: ${content.text.substring(0, 60)}${content.text.length > 60 ? '...' : ''}\n`;
+            confirmMsg += `👥 Recipients: ${statusJidList.length}\n⏰ Visible for 24 hours`;
+
+            await sock.sendMessage(chatId, { text: confirmMsg }, { quoted: msg });
+            console.log(`✅ [toStatus] ${mediaType} posted — msgId: ${result?.key?.id}`);
+
+        } catch (err) {
+            console.error('❌ [toStatus] Error:', err.message);
+            await sock.sendMessage(chatId, { react: { text: '❌', key: msg.key } }).catch(() => {});
+
+            let errMsg = `❌ Failed to post status: ${err.message}`;
+            if (/connection closed/i.test(err.message))     errMsg = '❌ Connection dropped. Wait a moment and try again.';
+            else if (/timed?[\s-]?out/i.test(err.message))  errMsg = '❌ Request timed out. Try a smaller file.';
+            else if (/media/i.test(err.message))             errMsg = '❌ Media upload failed. File may be too large (max ~16 MB for video, 30 s max).';
+
+            await sock.sendMessage(chatId, { text: errMsg }, { quoted: msg });
+        }
+    }
+};
+
+================================================================================
+  REQUIRED CHANGES IN index.js (main file)
+================================================================================
+
+Your index.js needs the following things present for tostatus.js to work.
+If your bot already has them (common in most Baileys setups) you're good to go.
+Check each one and add any that are missing.
+
+─────────────────────────────────────────────────────────────────────────────
+1. STATUS@BROADCAST BYPASS (Critical — without this, statuses fail silently)
+─────────────────────────────────────────────────────────────────────────────
+When your bot wraps sock.sendMessage (e.g. to log or store messages), status
+posts break because the wrapper injects fields like messageContextInfo that
+WhatsApp rejects for status updates. You must bypass the wrapper for
+status@broadcast and call Baileys' original sendMessage directly.
+
+Add this BEFORE any custom sendMessage wrapper:
+
+    const originalSendMessage = sock.sendMessage.bind(sock);
+
+Then inside your wrapper, add this as the FIRST check:
+
+    sock.sendMessage = async (jid, content, options = {}, ...rest) => {
+        // Always bypass wrapper for status posts
+        if (jid === 'status@broadcast') {
+            return originalSendMessage(jid, content, options, ...rest);
+        }
+        // ... rest of your wrapper
+    };
+
+─────────────────────────────────────────────────────────────────────────────
+2. GLOBAL LIDS PHONE CACHE (Required for LID resolution)
+─────────────────────────────────────────────────────────────────────────────
+WhatsApp's multi-device protocol uses LID JIDs (e.g. 12345@lid) in group
+participant lists instead of plain phone numbers. You need a global Map that
+translates LIDs to phone numbers, populated as messages come in.
+
+Add near the top of index.js (after sock is created):
+
+    const lidPhoneCache = new Map();
+    globalThis.lidPhoneCache = lidPhoneCache;
+
+Then populate it whenever you resolve a LID anywhere in your message handler:
+
+    // Example: when you figure out a sender's phone from their LID
+    const lidNum = senderJid.split('@')[0].split(':')[0];
+    lidPhoneCache.set(lidNum, resolvedPhoneNumber);
+
+The more messages your bot processes, the more LIDs get resolved.
+
+─────────────────────────────────────────────────────────────────────────────
+3. GLOBAL GROUP METADATA CACHE (Speeds up contact list building)
+─────────────────────────────────────────────────────────────────────────────
+This is an in-memory cache of group metadata (including participant lists)
+already fetched during normal bot operation.
+
+    const groupMetadataCache = new Map();
+    globalThis.groupMetadataCache = groupMetadataCache;
+
+Populate it when fetching group metadata:
+
+    async function getGroupMeta(chatId) {
+        const cached = groupMetadataCache.get(chatId);
+        if (cached && Date.now() - cached.ts < 5 * 60 * 1000) return cached.data;
+        const metadata = await sock.groupMetadata(chatId);
+        groupMetadataCache.set(chatId, { data: metadata, ts: Date.now() });
+        return metadata;
+    }
+
+─────────────────────────────────────────────────────────────────────────────
+4. GLOBAL OWNER JID (Required)
+─────────────────────────────────────────────────────────────────────────────
+The owner's JID must be exposed globally so the command can always include
+the owner in the recipient list regardless of how many contacts loaded.
+
+    global.OWNER_JID = '254712345678@s.whatsapp.net'; // use your number
+    globalThis.OWNER_JID = global.OWNER_JID;
+
+─────────────────────────────────────────────────────────────────────────────
+5. GLOBAL CONTACT NAMES MAP (Optional but improves coverage)
+─────────────────────────────────────────────────────────────────────────────
+A Map populated via Baileys' contacts.upsert event. Gives extra contacts
+beyond group participants (e.g. people you've DM'd but share no group with).
+
+    global.contactNames = global.contactNames || new Map();
+
+    sock.ev.on('contacts.upsert', (contacts) => {
+        for (const contact of contacts) {
+            if (!contact.id) continue;
+            const jidKey = contact.id.includes('@') ? contact.id : `${contact.id}@s.whatsapp.net`;
+            const displayName = contact.notify || contact.name || contact.verifiedName || '';
+            if (displayName) global.contactNames.set(jidKey, displayName);
+        }
+    });
+
+─────────────────────────────────────────────────────────────────────────────
+6. LID_MAP TABLE IN SQLITE (Required if using sudo-store.js's getPhoneFromLid)
+─────────────────────────────────────────────────────────────────────────────
+The tostatus.js imports getPhoneFromLid from lib/sudo-store.js. This function
+reads from an SQLite table called lid_map. Make sure this table exists:
+
+    CREATE TABLE IF NOT EXISTS lid_map (
+        lid TEXT PRIMARY KEY,
+        phone_number TEXT NOT NULL
+    );
+
+If you don't use sudo-store.js, you can remove the import line from tostatus.js:
+
+    // Remove this line:
+    import { getPhoneFromLid } from '../../lib/sudo-store.js';
+
+    // And remove the "Source 2" block in resolveLidJid:
+    // const stored = getPhoneFromLid(lidNum);
+    // if (stored) return `${stored}@s.whatsapp.net`;
+
+=======================================================
+  HOW IT ALL WORKS — THE FULL PICTURE
+=======================================================
+
+WHY statusJidList EXISTS
+------------------------
+When you post to WhatsApp Status, the message is end-to-end encrypted. WhatsApp
+uses a protocol called Signal (same as Signal messenger). To encrypt a group
+broadcast like a status, WhatsApp creates a "sender key" — a shared secret.
+
+statusJidList tells Baileys: "send this sender key to all these people so they
+can decrypt and view my status."
+
+If the list is wrong or empty:
+  - The status posts successfully to WhatsApp's servers (you get a message ID)
+  - But nobody receives the decryption key
+  - So everyone's app silently shows nothing — the status is invisible
+
+That's why "Posted successfully" in logs doesn't mean "visible to everyone."
+
+THE LID PROBLEM
+---------------
+WhatsApp's newer multi-device protocol identifies group participants using
+LIDs (Linked IDs) — opaque numeric identifiers like 12345678@lid — instead
+of phone numbers. This is a privacy feature.
+
+When this bot calls sock.groupFetchAllParticipating(), it gets back all groups.
+But every participant's id field looks like "98765432@lid" instead of
+"254712345678@s.whatsapp.net". So if you just filter for @s.whatsapp.net JIDs,
+you get 0 contacts from groups — exactly the bug that was happening here.
+
+THE FIX
+-------
+resolveLidJid() converts @lid → @s.whatsapp.net using three fallback sources:
+  1. globalThis.lidPhoneCache  — built up as the bot processes messages
+  2. getPhoneFromLid()         — queries the lid_map SQLite table (persistent)
+  3. sock.signalRepository.lidMapping.getPNForLID() — Baileys' built-in lookup
+
+The more the bot runs, the more LIDs get resolved automatically.
+
+THE 1-HOUR CACHE
+----------------
+Building the contact list means fetching all groups from WhatsApp (slow).
+The result is cached for 1 hour. First .tostatus call each hour takes ~3-10s.
+All subsequent calls within that hour are instant.
+
+FIRST RUN BEHAVIOUR
+-------------------
+  ⏳ reaction appears immediately
+  ~3-10 seconds: fetches all groups, resolves LIDs
+  ✅ reaction appears: status is posted
+  Bot replies: "✅ Status Posted! ... Recipients: 450"
+
+=====================================================
+  DEPENDENCIES
+=====================================================
+
+  @whiskeysockets/baileys   — WhatsApp Web API
+  lib/menuHelper.js         — getOwnerName() function (returns bot name string)
+  lib/sudo-store.js         — getPhoneFromLid() (SQLite LID→phone lookup)
+
+======================================================
+  TROUBLESHOOTING
+======================================================
+
+Problem:  "Recipients: 1" or very low count
+Cause:    Most LIDs couldn't be resolved — DB doesn't have them yet
+Fix:      Let the bot run for a while processing messages to build up the cache.
+          More messages = more LID mappings saved. The count grows over time.
+
+Problem:  Status posts but not visible on phone
+Cause:    The phone itself isn't in the recipient list with the correct JID
+Fix:      Make sure globalThis.OWNER_JID is set to your exact phone number JID
+          e.g. "254712345678@s.whatsapp.net" (no +, no spaces, no :device)
+
+Problem:  "groupFetchAllParticipating skipped: timeout"
+Cause:    WhatsApp took >15 seconds to return group list (rare)
+Fix:      Status still posts using whatever contacts were in sources 1 and 2.
+          Retry after a moment — next call hits the 1h cache if it built.
+
+Problem:  "connection closed" error
+Cause:    Bot disconnected mid-post (common if posting large video)
+Fix:      Reconnect and retry. Large videos (>16MB) will always fail.
+
+Problem:  Import error for getPhoneFromLid
+Cause:    Your project doesn't have lib/sudo-store.js or that export
+Fix:      Remove the import and the Source 2 block in resolveLidJid as
+          described in the REQUIRED CHANGES section above.
+
+=========================================================

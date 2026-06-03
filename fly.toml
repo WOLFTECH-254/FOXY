@@ -1,0 +1,51 @@
+# ════════════════════════════════════════════════════════
+#   🦊  FOXY BOT — Fly.io Configuration
+#   Deploy: fly launch --no-deploy  (then fly deploy)
+# ════════════════════════════════════════════════════════
+
+app = "foxy-bot"
+primary_region = "jnb"   # Johannesburg — change to your nearest region
+                          # Other options: lhr (London), fra (Frankfurt),
+                          #   sin (Singapore), ord (Chicago), lax (Los Angeles)
+
+[build]
+  # Uses the Dockerfile if present, otherwise auto-detects Node.js
+  [build.args]
+    NODE_VERSION = "20"
+
+[env]
+  NODE_ENV       = "production"
+  BOT_NAME       = "FOXY BOT"
+  BOT_PREFIX     = "."
+  BOT_MODE       = "public"
+  BOT_TIMEZONE   = "UTC"
+
+# Secrets (set via CLI — never put real values here):
+#   fly secrets set SESSION_ID="FOXY-BOT:your_session"
+#   fly secrets set OWNER_NUMBER="254712345678"
+#   fly secrets set DATABASE_URL="postgres://..."
+#   fly secrets set PTERODACTYL_URL="https://panel.example.com"
+#   fly secrets set PTERODACTYL_KEY="ptlc_..."
+#   fly secrets set PAYSTACK_KEY="sk_live_..."
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[processes]
+  bot = "node --no-warnings --expose-gc --max-old-space-size=1024 --max-semi-space-size=64 --experimental-global-webcrypto fox.js"
+
+# Persistent volume — mounts to /home/runner/workspace so .bkp settings persist
+[[mounts]]
+  source      = "foxy_data"
+  destination = "/home/runner/workspace"
+  initial_size = "1gb"
+
+# Keep the machine alive (WhatsApp bots need a persistent connection)
+[checks]
+  [checks.alive]
+    type     = "tcp"
+    interval = "30s"
+    timeout  = "10s"
+    grace_period = "60s"

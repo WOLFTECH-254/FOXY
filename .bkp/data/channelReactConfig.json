@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "emoji": "😊",
+  "totalReacted": 0,
+  "lastReacted": null,
+  "lastReactionTime": 0,
+  "subscribedJids": [],
+  "settings": {
+    "minDelay": 300000,
+    "maxDelay": 360000
+  }
+}

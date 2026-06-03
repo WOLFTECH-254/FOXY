@@ -1,0 +1,21 @@
+{
+  "name": "foxy-bot",
+  "version": "1.0.0",
+  "description": "FOXY BOT - Smart WhatsApp Bot powered by AI",
+  "main": "index.js",
+  "scripts": {
+    "start": "node fox.js",
+    "dev": "node fox.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "ai"
+  ],
+  "author": "WOLFTECH-254",
+  "license": "ISC",
+  "dependencies": {
+    "adm-zip": "^0.5.17",
+    "express": "^5.2.1"
+  }
+}
